@@ -105,6 +105,10 @@ __device__ float3 computeCov2D(const float3& mean, float focal_x, float focal_y,
 
 	glm::mat3 cov = glm::transpose(T) * glm::transpose(Vrk) * T;
 
+	// Apply low-pass filter: every Gaussian should be at least
+	// one pixel wide/high. Discard 3rd row and column.
+	cov[0][0] += 0.3f;
+	cov[1][1] += 0.3f;
 	return { float(cov[0][0]), float(cov[0][1]), float(cov[1][1]) };
 }
 
@@ -279,12 +283,14 @@ renderCUDA(
 	int W, int H,
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
+	const float* __restrict__ depths,
 	const float4* __restrict__ conic_opacity,
+	float* __restrict__ out_alpha,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
-	const float* __restrict__ depths,
+	const float* __restrict__ out_depth,
 	float* __restrict__ invdepth)
 {
 	// Identify current tile and associated min/max pixel range.
@@ -316,6 +322,8 @@ renderCUDA(
 	uint32_t contributor = 0;
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
+	float weight = 0;
+	float D = 0;
 
 	float expected_invdepth = 0.0f;
 
@@ -370,6 +378,8 @@ renderCUDA(
 			// Eq. (3) from 3D Gaussian splatting paper.
 			for (int ch = 0; ch < CHANNELS; ch++)
 				C[ch] += features[collected_id[j] * CHANNELS + ch] * alpha * T;
+			weight += alpha * T;
+			D += depths[collected_id[j]] * alpha * T;
 
 			if(invdepth)
 			expected_invdepth += (1 / depths[collected_id[j]]) * alpha * T;
@@ -390,6 +400,8 @@ renderCUDA(
 		n_contrib[pix_id] = last_contributor;
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
+		out_alpha[pix_id] = weight; //1 - T;
+		out_depth[pix_id] = D;
 
 		if (invdepth)
 		invdepth[pix_id] = expected_invdepth;// 1. / (expected_depth + T * 1e3);
@@ -404,12 +416,13 @@ void FORWARD::render(
 	const float2* means2D,
 	const float* colors,
 	const float4* conic_opacity,
+	float* out_alpha,
 	float* final_T,
 	uint32_t* n_contrib,
 	const float* bg_color,
 	float* out_color,
 	float* depths,
-	float* depth)
+	float* out_depth)
 {
 	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
@@ -418,12 +431,13 @@ void FORWARD::render(
 		means2D,
 		colors,
 		conic_opacity,
+		out_alpha,
 		final_T,
 		n_contrib,
 		bg_color,
 		out_color,
 		depths, 
-		depth);
+		out_depth);
 }
 
 void FORWARD::preprocess(int P, int D, int M,
